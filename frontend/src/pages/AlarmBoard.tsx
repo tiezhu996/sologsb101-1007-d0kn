@@ -181,9 +181,9 @@ export default function AlarmBoard() {
       width: 130,
       render: (_value, record) => {
         const observation = observationTable.rows.find(
-          (row) => row.pointId === record.pointId && row.date === record.triggerDate
+          (row) => row.pointId === record.pointId && row.date === record.triggerDate && !row.voided
         )
-        return observation ? observation.reading.toFixed(3) : <span className="muted">—</span>
+        return observation ? observation.reading.toFixed(3) : <span className="muted">已作废/删除</span>
       }
     },
     {

@@ -19,6 +19,7 @@ import {
 } from 'antd'
 import type { TableColumnsType } from 'antd'
 import AlarmTag from '@/components/common/AlarmTag'
+import CorrectionTrace from '@/components/common/CorrectionTrace'
 import EmptyPanel from '@/components/common/EmptyPanel'
 import FilterBar, { type FilterModel } from '@/components/common/FilterBar'
 import StatBadge from '@/components/common/StatBadge'
@@ -90,8 +91,9 @@ export default function TrendBoard() {
         return true
       })
       .map((point) => {
+        // 作废行仅留痕，不参与累计量、日速率与越限计算
         const own = observationTable.rows
-          .filter((row) => row.pointId === point.id)
+          .filter((row) => row.pointId === point.id && !row.voided)
           .sort((a, b) => a.date.localeCompare(b.date))
         const latest = own[own.length - 1] ?? null
         const section = damStore.sections.find((item) => item.id === point.sectionId)
@@ -120,14 +122,15 @@ export default function TrendBoard() {
   }, [trendRows])
 
   const drawerPoint = drawerPointId ? pointStore.points.find((point) => point.id === drawerPointId) ?? null : null
+  // 抽屉序列保留作废行用于留痕查看，但最新判定只取未作废行
   const drawerObservations = useMemo(
     () =>
       observationTable.rows
         .filter((row) => row.pointId === drawerPointId)
-        .sort((a, b) => b.date.localeCompare(a.date)),
+        .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt),
     [observationTable.rows, drawerPointId]
   )
-  const drawerLatest = drawerObservations[0] ?? null
+  const drawerLatest = drawerObservations.find((row) => !row.voided) ?? null
   const drawerLevel = drawerPoint && drawerLatest ? alarmLevel.evaluate(drawerPoint, drawerLatest.reading).level : null
 
   const generateAlarm = async (point: Point, observation: ObservationRow): Promise<void> => {
@@ -345,13 +348,28 @@ export default function TrendBoard() {
                 bordered
                 pagination={false}
                 dataSource={drawerObservations}
+                rowClassName={(record) => (record.voided ? 'observation-row--voided' : '')}
                 columns={[
-                  { title: '日期', dataIndex: 'date', width: 120 },
-                  { title: '读数', dataIndex: 'reading', width: 110, render: (value: number) => value.toFixed(3) },
-                  { title: '累计变化', dataIndex: 'cumulative', width: 120, render: (value: number) => value.toFixed(3) },
-                  { title: '日速率', dataIndex: 'dailyRate', width: 110, render: (value: number) => value.toFixed(4) },
-                  { title: '观测人', dataIndex: 'observer', width: 100 }
+                  { title: '日期', dataIndex: 'date', width: 110 },
+                  {
+                    title: '读数',
+                    dataIndex: 'reading',
+                    width: 100,
+                    render: (value: number, record) => (
+                      <span style={{ textDecoration: record.voided ? 'line-through' : undefined }}>{value.toFixed(3)}</span>
+                    )
+                  },
+                  { title: '累计变化', dataIndex: 'cumulative', width: 100, render: (value: number) => value.toFixed(3) },
+                  { title: '日速率', dataIndex: 'dailyRate', width: 100, render: (value: number) => value.toFixed(4) },
+                  {
+                    title: '状态',
+                    width: 80,
+                    render: (_value, record) => (record.voided ? <Tag color="default">已作废</Tag> : <Tag color="green">有效</Tag>)
+                  },
+                  { title: '观测人', dataIndex: 'observer', width: 90 },
+                  { title: '修正留痕', width: 170, render: (_value, record) => <CorrectionTrace row={record} trigger="click" /> }
                 ]}
+                scroll={{ x: 860 }}
               />
             )}
           </>

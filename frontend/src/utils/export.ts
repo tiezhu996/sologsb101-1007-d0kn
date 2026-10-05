@@ -8,6 +8,7 @@ import type { Observation } from '@/types/observation'
 import type { Alarm } from '@/types/alarm'
 import type { Pool } from '@/types/pool'
 import { checkPool, MIN_BEACH_LENGTH_M, MIN_FREEBOARD_M } from '@/types/pool'
+import { formatCorrectedAt, latestCorrection, type CorrectionRecord } from '@/types/observation'
 import { ratioOf } from '@/utils/threshold'
 
 export function download(filename: string, content: string, mime: string): void {
@@ -39,7 +40,7 @@ export function csvCell(value: string | number): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** 观测台账 CSV */
+/** 观测台账 CSV（含修正原因及修改前后读数，作废行同样留存） */
 export function exportObservationCsv(
   dams: Dam[],
   sections: Section[],
@@ -61,15 +62,38 @@ export function exportObservationCsv(
     '累计变化',
     '日速率',
     '占阈值比(%)',
-    '观测人'
+    '观测人',
+    '记录状态',
+    '修正次数',
+    '最近修正动作',
+    '修改前读数',
+    '修改后读数',
+    '修正原因',
+    '修正人',
+    '修正时间',
+    '修正历史'
   ]
-  const lines: string[] = [header.map(csvCell).join(',')]
-  observations.forEach((observation) => {
+  const describeReading = (value: number | null): string => (value === null ? '已作废' : String(value))
+  const describeCorrection = (item: CorrectionRecord): string =>
+    `${item.action} ${formatCorrectedAt(item.correctedAt)} ${item.operator}：${describeReading(
+      item.readingBefore
+    )} → ${describeReading(item.readingAfter)}；原因：${item.reason}`
+
+  const enriched = observations.map((observation) => {
     const point = points.find((item) => item.id === observation.pointId)
     const section = point ? sections.find((item) => item.id === point.sectionId) : undefined
     const dam = section ? dams.find((item) => item.id === section.damId) : undefined
-    lines.push(
-      [
+    const latest = latestCorrection(observation)
+    const corrections = observation.corrections ?? []
+    return {
+      sortKey: [
+        dam ? dam.name : '—',
+        section ? section.stakeNo : '—',
+        point ? point.code : '—',
+        observation.date,
+        String(observation.createdAt ?? 0)
+      ].join('|'),
+      cells: [
         dam ? dam.name : '—',
         dam ? dam.damType : '—',
         dam ? dam.grade : '—',
@@ -84,11 +108,23 @@ export function exportObservationCsv(
         observation.cumulative,
         observation.dailyRate,
         point ? (ratioOf(observation.cumulative, point.threshold) * 100).toFixed(1) : '—',
-        observation.observer
+        observation.observer,
+        observation.voided ? '已作废' : '正常',
+        corrections.length,
+        latest ? latest.action : '',
+        latest ? describeReading(latest.readingBefore) : '',
+        latest ? describeReading(latest.readingAfter) : '',
+        latest ? latest.reason : '',
+        latest ? latest.operator : '',
+        latest ? formatCorrectedAt(latest.correctedAt) : '',
+        corrections.map(describeCorrection).join(' ／ ')
       ]
-        .map(csvCell)
-        .join(',')
-    )
+    }
+  })
+  enriched.sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'zh-Hans-CN'))
+  const lines: string[] = [header.map(csvCell).join(',')]
+  enriched.forEach((item) => {
+    lines.push(item.cells.map(csvCell).join(','))
   })
   const filename = `监测观测台账-${stampSuffix()}.csv`
   download(filename, `\uFEFF${lines.join('\n')}`, 'text/csv;charset=utf-8')

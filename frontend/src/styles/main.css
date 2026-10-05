@@ -193,6 +193,12 @@ body {
   font-size: 12px;
 }
 
+/* 已作废观测行：灰化，提示该行仅作留痕、不参与重算与预警判定 */
+.observation-row--voided > td {
+  background-color: #f5f5f5;
+  color: #8c8c8c;
+}
+
 .panel-title {
   margin: 0 0 12px;
   font-size: 15px;
