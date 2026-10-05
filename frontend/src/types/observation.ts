@@ -11,6 +11,14 @@ export interface Observation {
   /** 日速率（与上一次观测的差值 ÷ 间隔天数） */
   dailyRate: number
   observer: string
+  /** 修正原因（编辑 / 作废时必填，留痕持久化） */
+  correctionReason?: string
+  /** 修改前读数（修正留痕） */
+  previousReading?: number | null
+  /** 修正时间戳 */
+  correctedAt?: number | null
+  /** 是否已作废（软删除：明细保留留痕，但不参与累计量与日速率重算） */
+  voided?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -20,13 +28,16 @@ export interface ObservationDraft {
   date: string
   reading: number
   observer: string
+  /** 修正原因：仅编辑已有记录时必填 */
+  correctionReason?: string
 }
 
 export const EMPTY_OBSERVATION_DRAFT: ObservationDraft = {
   pointId: '',
   date: '',
   reading: 0,
-  observer: ''
+  observer: '',
+  correctionReason: ''
 }
 
 /** 单测点观测序列取点 */

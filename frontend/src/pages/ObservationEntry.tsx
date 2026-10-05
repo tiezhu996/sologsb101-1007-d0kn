@@ -4,7 +4,7 @@
  * 消费 Observation、Point；复用 <FilterBar>、<AlarmTag>、<EmptyPanel>、<StatBadge>。
  */
 import { useMemo, useState } from 'react'
-import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Popconfirm, Space, Table, Tag } from 'antd'
+import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Space, Table, Tag } from 'antd'
 import type { TableColumnsType } from 'antd'
 import AlarmTag from '@/components/common/AlarmTag'
 import EmptyPanel from '@/components/common/EmptyPanel'
@@ -15,7 +15,16 @@ import { usePointStore } from '@/stores/pointStore'
 import { useAlarmStore } from '@/stores/alarmStore'
 import { useAlarmLevel } from '@/hooks/useAlarmLevel'
 import { useIdbTable } from '@/hooks/useIdbTable'
-import { db, putObservation, type ObservationRow } from '@/utils/db'
+import {
+  correctObservation,
+  db,
+  putObservation,
+  recalculateObservations,
+  voidObservation,
+  type CorrectionResult,
+  type ObservationRow
+} from '@/utils/db'
+import { exportObservationCsv } from '@/utils/export'
 import { POINT_TYPES, type Point, type PointType } from '@/types/point'
 import type { ObservationDraft } from '@/types/observation'
 
@@ -30,6 +39,9 @@ export default function ObservationEntry() {
   const [form] = Form.useForm<ObservationDraft>()
   const [open, setOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingRow, setEditingRow] = useState<ObservationRow | null>(null)
+  const [voidTarget, setVoidTarget] = useState<ObservationRow | null>(null)
+  const [voidForm] = Form.useForm<{ reason: string }>()
 
   const filter = pointStore.filter
   const filterSelects = useMemo(
@@ -87,25 +99,37 @@ export default function ObservationEntry() {
       return
     }
     setEditingId(null)
-    const latest = observationsOfActive[0]
+    setEditingRow(null)
+    const latest = observationsOfActive.find((row) => row.voided !== true)
     form.setFieldsValue({
       pointId: activePoint.id,
       date: new Date().toISOString().slice(0, 10),
       reading: latest ? latest.reading : activePoint.initialValue,
-      observer: ''
+      observer: '',
+      correctionReason: ''
     })
     setOpen(true)
   }
 
   const openEdit = (row: ObservationRow): void => {
     setEditingId(row.id)
+    setEditingRow(row)
     form.setFieldsValue({
       pointId: row.pointId,
       date: row.date,
       reading: row.reading,
-      observer: row.observer
+      observer: row.observer,
+      correctionReason: ''
     })
     setOpen(true)
+  }
+
+  /** 修正结果提示：重算条数 + 未闭环预警同步情况 */
+  const notifyCorrection = (prefix: string, result: CorrectionResult): void => {
+    const parts = [`${prefix}，已按日期顺序重算 ${result.recalculated} 条观测`]
+    if (result.updated > 0) parts.push(`同步更新 ${result.updated} 张未闭环预警`)
+    if (result.revoked > 0) parts.push(`撤销 ${result.revoked} 张不再越限的未闭环预警`)
+    message.success(parts.join('；'))
   }
 
   const submit = async (): Promise<void> => {
@@ -119,26 +143,52 @@ export default function ObservationEntry() {
     }
     const now = Date.now()
     try {
-      await putObservation({
-        id: editingId ?? `ob_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-        pointId,
-        date: values.date,
-        reading: Number(values.reading) || 0,
-        observer: values.observer.trim() || '未署名',
-        createdAt: now,
-        updatedAt: now
-      })
+      if (editingId) {
+        // 修正流程：留痕原因与修改前读数 → 重算该测点全部观测 → 同步未闭环预警
+        const result = await correctObservation(editingId, {
+          date: values.date,
+          reading: Number(values.reading) || 0,
+          observer: values.observer.trim() || '未署名',
+          reason: (values.correctionReason ?? '').trim()
+        })
+        notifyCorrection('观测记录已修正', result)
+      } else {
+        await putObservation({
+          id: `ob_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+          pointId,
+          date: values.date,
+          reading: Number(values.reading) || 0,
+          observer: values.observer.trim() || '未署名',
+          createdAt: now,
+          updatedAt: now
+        })
+        // 补录历史日期同样会让后续记录的日速率失真，录入后整列重算一次
+        await recalculateObservations(pointId)
+        message.success('观测已录入，累计量与日速率已自动计算')
+      }
     } catch (error) {
       message.error(`观测保存失败：${error instanceof Error ? error.message : '未知错误'}`)
       return
     }
-    message.success(editingId ? '观测记录已更新，累计量与日速率已重算' : '观测已录入，累计量与日速率已自动计算')
     setOpen(false)
   }
 
-  const remove = async (row: ObservationRow): Promise<void> => {
-    await db.observations.delete(row.id)
-    message.success('观测记录已删除')
+  const openVoid = (row: ObservationRow): void => {
+    setVoidTarget(row)
+    voidForm.setFieldsValue({ reason: '' })
+  }
+
+  const submitVoid = async (): Promise<void> => {
+    const values = await voidForm.validateFields().catch(() => null)
+    if (!values || !voidTarget) return
+    try {
+      const result = await voidObservation(voidTarget.id, values.reason.trim())
+      notifyCorrection('观测记录已作废', result)
+    } catch (error) {
+      message.error(`作废失败：${error instanceof Error ? error.message : '未知错误'}`)
+      return
+    }
+    setVoidTarget(null)
   }
 
   const generateAlarm = async (): Promise<void> => {
@@ -161,41 +211,84 @@ export default function ObservationEntry() {
   }
 
   const columns: TableColumnsType<ObservationRow> = [
-    { title: '日期', dataIndex: 'date', width: 120 },
-    { title: '读数', dataIndex: 'reading', width: 120, render: (value: number) => value.toFixed(3) },
+    { title: '日期', dataIndex: 'date', width: 110 },
+    {
+      title: '状态',
+      width: 80,
+      render: (_value, record) =>
+        record.voided === true ? <Tag color="red">已作废</Tag> : <Tag color="green">有效</Tag>
+    },
+    {
+      title: '读数',
+      dataIndex: 'reading',
+      width: 110,
+      render: (value: number, record) => (
+        <span style={record.voided === true ? { textDecoration: 'line-through' } : undefined}>{value.toFixed(3)}</span>
+      )
+    },
     {
       title: '累计变化',
       dataIndex: 'cumulative',
-      width: 130,
-      render: (value: number) => <span style={{ color: value >= 0 ? '#b03a2e' : '#2f7a4f' }}>{value.toFixed(3)}</span>
+      width: 110,
+      render: (value: number, record) =>
+        record.voided === true ? (
+          <span className="muted">—</span>
+        ) : (
+          <span style={{ color: value >= 0 ? '#b03a2e' : '#2f7a4f' }}>{value.toFixed(3)}</span>
+        )
     },
-    { title: '日速率', dataIndex: 'dailyRate', width: 120, render: (value: number) => value.toFixed(4) },
+    {
+      title: '日速率',
+      dataIndex: 'dailyRate',
+      width: 100,
+      render: (value: number, record) => (record.voided === true ? <span className="muted">—</span> : value.toFixed(4))
+    },
     {
       title: '判定',
-      width: 150,
+      width: 100,
       render: (_value, record) => {
+        if (record.voided === true) return <span className="muted">—</span>
         const point = pointStore.points.find((item) => item.id === record.pointId)
         if (!point) return <span className="muted">测点已删除</span>
         const level = alarmLevel.evaluate(point, record.reading).level
         return level ? <AlarmTag level={level} size="small" /> : <Tag color="green">正常</Tag>
       }
     },
-    { title: '观测人', dataIndex: 'observer', width: 100 },
+    { title: '观测人', dataIndex: 'observer', width: 90 },
+    {
+      title: '修正留痕',
+      width: 220,
+      render: (_value, record) => {
+        const reason = record.correctionReason?.trim()
+        if (!reason) return <span className="muted">—</span>
+        const previous = record.previousReading
+        return (
+          <div>
+            <div>{reason}</div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {typeof previous === 'number' ? `读数 ${previous.toFixed(3)} → ${record.reading.toFixed(3)}` : ''}
+              {record.correctedAt ? ` · ${new Date(record.correctedAt).toLocaleString('zh-CN', { hour12: false })}` : ''}
+            </div>
+          </div>
+        )
+      }
+    },
     {
       title: '操作',
-      width: 130,
-      render: (_value, record) => (
-        <Space size={4}>
-          <Button type="link" size="small" onClick={() => openEdit(record)}>
-            编辑
-          </Button>
-          <Popconfirm title="确认删除该观测记录？" onConfirm={() => remove(record)}>
-            <Button type="link" size="small" danger>
-              删除
+      width: 120,
+      render: (_value, record) =>
+        record.voided === true ? (
+          <span className="muted">已作废</span>
+        ) : (
+          <Space size={4}>
+            <Button type="link" size="small" onClick={() => openEdit(record)}>
+              编辑
             </Button>
-          </Popconfirm>
-        </Space>
-      )
+            <Button type="link" size="small" danger onClick={() => openVoid(record)}>
+              作废
+            </Button>
+          </Space>
+        )
     }
   ]
 
@@ -205,10 +298,17 @@ export default function ObservationEntry() {
         <div>
           <h2 className="page-head__title">位移 / 浸润线观测录入</h2>
           <p className="page-head__desc">
-            选定测点后按日期录入读数，系统自动与初值比对算累计量与日速率，越限可直接生成预警单。
+            选定测点后按日期录入读数，系统自动与初值比对算累计量与日速率，越限可直接生成预警单；编辑或作废须填修正原因，保存后整列重算并同步未闭环预警。
           </p>
         </div>
         <div className="page-head__actions">
+          <Button
+            onClick={() =>
+              exportObservationCsv(damStore.dams, damStore.sections, pointStore.points, observationTable.rows)
+            }
+          >
+            导出 CSV
+          </Button>
           {/* 「生成预警单」已移入录入观测弹窗 footer：读数草稿只在弹窗内存在，页面头部按钮无法被点击（被弹窗遮罩拦截） */}
           <Button type="primary" disabled={!activePoint} onClick={openCreate}>
             录入观测
@@ -238,7 +338,7 @@ export default function ObservationEntry() {
           ) : (
             candidates.map((point: Point) => {
               const latest = observationTable.rows
-                .filter((row) => row.pointId === point.id)
+                .filter((row) => row.pointId === point.id && row.voided !== true)
                 .sort((a, b) => b.date.localeCompare(a.date))[0]
               const level = latest ? alarmLevel.evaluate(point, latest.reading).level : null
               return (
@@ -341,6 +441,22 @@ export default function ObservationEntry() {
           <Form.Item name="observer" label="观测人" rules={[{ required: true, message: '请填写观测人' }]}>
             <Input placeholder="如 刘振国" />
           </Form.Item>
+          {editingRow ? (
+            <>
+              <Form.Item
+                name="correctionReason"
+                label="修正原因"
+                rules={[{ required: true, message: '编辑观测记录必须填写修正原因' }]}
+                extra={
+                  typeof editingRow.previousReading === 'number'
+                    ? `上次修正：读数 ${editingRow.previousReading.toFixed(3)} → ${editingRow.reading.toFixed(3)}`
+                    : `当前读数 ${editingRow.reading.toFixed(3)}，保存后将留痕修改前后读数`
+                }
+              >
+                <Input.TextArea rows={2} placeholder="如 读数誊录错误，复核原始记录后更正" />
+              </Form.Item>
+            </>
+          ) : null}
           {preview ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span className="muted">
@@ -349,6 +465,26 @@ export default function ObservationEntry() {
               {preview.level ? <AlarmTag level={preview.level} /> : <Tag color="green">正常</Tag>}
             </div>
           ) : null}
+        </Form>
+      </Modal>
+
+      <Modal
+        open={voidTarget !== null}
+        title={voidTarget ? `作废观测记录 · ${voidTarget.date}` : '作废观测记录'}
+        onCancel={() => setVoidTarget(null)}
+        onOk={submitVoid}
+        okText="确认作废"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        destroyOnClose
+      >
+        <p className="muted" style={{ marginTop: 0 }}>
+          作废后该记录保留在明细中留痕，但不再参与累计变化与日速率计算；系统将按日期顺序重算该测点全部观测，并同步未闭环预警。
+        </p>
+        <Form form={voidForm} layout="vertical">
+          <Form.Item name="reason" label="作废原因" rules={[{ required: true, message: '作废观测记录必须填写修正原因' }]}>
+            <Input.TextArea rows={2} placeholder="如 读数严重异常，经复核为仪器故障数据" />
+          </Form.Item>
         </Form>
       </Modal>
     </div>

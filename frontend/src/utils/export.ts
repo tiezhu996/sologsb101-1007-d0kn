@@ -39,7 +39,7 @@ export function csvCell(value: string | number): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** 观测台账 CSV */
+/** 观测台账 CSV（含作废标记与修正留痕） */
 export function exportObservationCsv(
   dams: Dam[],
   sections: Section[],
@@ -57,17 +57,22 @@ export function exportObservationCsv(
     '阈值',
     '单位',
     '观测日期',
+    '状态',
     '读数',
     '累计变化',
     '日速率',
     '占阈值比(%)',
-    '观测人'
+    '观测人',
+    '修正原因',
+    '修改前读数',
+    '修正时间'
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   observations.forEach((observation) => {
     const point = points.find((item) => item.id === observation.pointId)
     const section = point ? sections.find((item) => item.id === point.sectionId) : undefined
     const dam = section ? dams.find((item) => item.id === section.damId) : undefined
+    const voided = observation.voided === true
     lines.push(
       [
         dam ? dam.name : '—',
@@ -80,11 +85,15 @@ export function exportObservationCsv(
         point ? point.threshold : '—',
         point ? point.unit : '—',
         observation.date,
+        voided ? '已作废' : '有效',
         observation.reading,
-        observation.cumulative,
-        observation.dailyRate,
-        point ? (ratioOf(observation.cumulative, point.threshold) * 100).toFixed(1) : '—',
-        observation.observer
+        voided ? '—' : observation.cumulative,
+        voided ? '—' : observation.dailyRate,
+        point && !voided ? (ratioOf(observation.cumulative, point.threshold) * 100).toFixed(1) : '—',
+        observation.observer,
+        observation.correctionReason?.trim() || '—',
+        typeof observation.previousReading === 'number' ? observation.previousReading : '—',
+        observation.correctedAt ? new Date(observation.correctedAt).toLocaleString('zh-CN', { hour12: false }) : '—'
       ]
         .map(csvCell)
         .join(',')

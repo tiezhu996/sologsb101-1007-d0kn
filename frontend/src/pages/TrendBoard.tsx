@@ -91,7 +91,7 @@ export default function TrendBoard() {
       })
       .map((point) => {
         const own = observationTable.rows
-          .filter((row) => row.pointId === point.id)
+          .filter((row) => row.pointId === point.id && row.voided !== true)
           .sort((a, b) => a.date.localeCompare(b.date))
         const latest = own[own.length - 1] ?? null
         const section = damStore.sections.find((item) => item.id === point.sectionId)
@@ -127,7 +127,8 @@ export default function TrendBoard() {
         .sort((a, b) => b.date.localeCompare(a.date)),
     [observationTable.rows, drawerPointId]
   )
-  const drawerLatest = drawerObservations[0] ?? null
+  // 最新判定只看有效观测：作废记录不参与速率排行与预警判定
+  const drawerLatest = drawerObservations.find((row) => row.voided !== true) ?? null
   const drawerLevel = drawerPoint && drawerLatest ? alarmLevel.evaluate(drawerPoint, drawerLatest.reading).level : null
 
   const generateAlarm = async (point: Point, observation: ObservationRow): Promise<void> => {
@@ -346,11 +347,56 @@ export default function TrendBoard() {
                 pagination={false}
                 dataSource={drawerObservations}
                 columns={[
-                  { title: '日期', dataIndex: 'date', width: 120 },
-                  { title: '读数', dataIndex: 'reading', width: 110, render: (value: number) => value.toFixed(3) },
-                  { title: '累计变化', dataIndex: 'cumulative', width: 120, render: (value: number) => value.toFixed(3) },
-                  { title: '日速率', dataIndex: 'dailyRate', width: 110, render: (value: number) => value.toFixed(4) },
-                  { title: '观测人', dataIndex: 'observer', width: 100 }
+                  { title: '日期', dataIndex: 'date', width: 110 },
+                  {
+                    title: '状态',
+                    width: 76,
+                    render: (_value, record) =>
+                      record.voided === true ? <Tag color="red">已作废</Tag> : <Tag color="green">有效</Tag>
+                  },
+                  {
+                    title: '读数',
+                    dataIndex: 'reading',
+                    width: 100,
+                    render: (value: number, record) => (
+                      <span style={record.voided === true ? { textDecoration: 'line-through' } : undefined}>
+                        {value.toFixed(3)}
+                      </span>
+                    )
+                  },
+                  {
+                    title: '累计变化',
+                    dataIndex: 'cumulative',
+                    width: 100,
+                    render: (value: number, record) =>
+                      record.voided === true ? <span className="muted">—</span> : value.toFixed(3)
+                  },
+                  {
+                    title: '日速率',
+                    dataIndex: 'dailyRate',
+                    width: 96,
+                    render: (value: number, record) =>
+                      record.voided === true ? <span className="muted">—</span> : value.toFixed(4)
+                  },
+                  { title: '观测人', dataIndex: 'observer', width: 90 },
+                  {
+                    title: '修正留痕',
+                    width: 200,
+                    render: (_value, record) => {
+                      const reason = record.correctionReason?.trim()
+                      if (!reason) return <span className="muted">—</span>
+                      return (
+                        <div>
+                          <div>{reason}</div>
+                          <div className="muted" style={{ fontSize: 12 }}>
+                            {typeof record.previousReading === 'number'
+                              ? `读数 ${record.previousReading.toFixed(3)} → ${record.reading.toFixed(3)}`
+                              : ''}
+                          </div>
+                        </div>
+                      )
+                    }
+                  }
                 ]}
               />
             )}
